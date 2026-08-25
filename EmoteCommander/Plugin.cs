@@ -2,21 +2,37 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
+using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using EmoteCommander.Ui;
 
 namespace EmoteCommander;
 
 public sealed class Plugin : IDalamudPlugin
 {
+    private const string MainCommand = "/emotecommander";
+    private const string ShortCommand = "/ec";
     private const string DebugCommand = "/ecdebug";
+
+    /// <summary>Where /ecdebug importfile looks when given no path.</summary>
+    private static string DefaultImportPath => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "XIVLauncher", "pluginConfigs", "EmoteCommander.import.txt");
 
     private readonly IPluginLog _log;
     private readonly ICommandManager _commands;
     private readonly IChatGui _chat;
+    private readonly IDalamudPluginInterface _pi;
 
+    private readonly Config _config;
     private readonly PenumbraBridge _penumbra;
     private readonly EmoteCatalogue _emotes;
+    private readonly EmotePlayer _player;
+    private readonly CommandRunner _runner;
+
+    private readonly WindowSystem _windows = new("EmoteCommander");
+    private readonly ConfigWindow _configWindow;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -25,80 +41,147 @@ public sealed class Plugin : IDalamudPlugin
         IChatGui chat,
         IDataManager data)
     {
+        _pi = pluginInterface;
         _log = log;
         _commands = commands;
         _chat = chat;
 
-        _emotes = new EmoteCatalogue(data, log);
-        _penumbra = new PenumbraBridge(pluginInterface, log);
+        _config = _pi.GetPluginConfig() as Config ?? new Config();
+        _config.Initialise(_pi);
 
+        _emotes = new EmoteCatalogue(data, log);
+        _penumbra = new PenumbraBridge(_pi, log);
+        _player = new EmotePlayer(log);
+        _runner = new CommandRunner(_config, _penumbra, _emotes, _player, commands, chat, log);
+
+        _configWindow = new ConfigWindow(_config, _penumbra, _emotes, _runner);
+        _windows.AddWindow(_configWindow);
+
+        _pi.UiBuilder.Draw += _windows.Draw;
+        _pi.UiBuilder.OpenConfigUi += ToggleWindow;
+        _pi.UiBuilder.OpenMainUi += ToggleWindow;
+
+        _commands.AddHandler(MainCommand, new CommandInfo((_, _) => ToggleWindow())
+        {
+            HelpMessage = "Open Emote Commander.",
+            ShowInHelp = true,
+        });
+        _commands.AddHandler(ShortCommand, new CommandInfo((_, _) => ToggleWindow())
+        {
+            HelpMessage = "Open Emote Commander.",
+            ShowInHelp = false,
+        });
         _commands.AddHandler(DebugCommand, new CommandInfo(OnDebug)
         {
             HelpMessage = "Emote Commander: report what the plugin can see. "
-                        + "Add 'redraw' to test redraw completion.",
-            ShowInHelp = true,
+                        + "'redraw' tests redraw completion.",
+            ShowInHelp = false,
         });
+
+        _runner.RegisterAll();
+
+        if (!_penumbra.Available)
+            _chat.PrintError("[EC] Penumbra was not found. Emote Commander needs it to work.");
 
         _log.Information("Emote Commander loaded.");
     }
 
+    private void ToggleWindow() => _configWindow.Toggle();
+
     private void OnDebug(string command, string args)
     {
-        var arg = args.Trim().ToLowerInvariant();
+        var trimmed = args.Trim();
 
-        if (arg == "redraw")
+        if (trimmed.Equals("redraw", StringComparison.OrdinalIgnoreCase))
         {
             _ = TestRedrawAsync();
             return;
         }
 
-        _chat.Print($"[EC] Penumbra: {(_penumbra.Available ? "connected" : "UNAVAILABLE - " + _penumbra.Unavailable)}");
+        if (trimmed.StartsWith("importfile", StringComparison.OrdinalIgnoreCase))
+        {
+            // Reading from a file avoids two failure modes at once: chat
+            // mangling a long code, and a human retyping one.
+            var path = trimmed.Length > 10 ? trimmed[10..].Trim() : DefaultImportPath;
+            try
+            {
+                ImportShareCode(System.IO.File.ReadAllText(path));
+            }
+            catch (Exception ex)
+            {
+                _chat.PrintError($"[EC] Could not read {path}: {ex.Message}");
+            }
+            return;
+        }
 
+        if (trimmed.StartsWith("import ", StringComparison.OrdinalIgnoreCase))
+        {
+            ImportShareCode(trimmed[7..].Trim());
+            return;
+        }
+
+        if (trimmed.StartsWith("export", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_config.Presets.Count == 0)
+                _chat.Print("[EC] No commands to export.");
+            else
+                _log.Information("Share code:\n" + ShareCode.Encode(_config.Presets));
+            _chat.Print("[EC] Share code written to /xllog.");
+            return;
+        }
+
+        _chat.Print($"[EC] Penumbra: {(_penumbra.Available ? "connected" : "UNAVAILABLE - " + _penumbra.Unavailable)}");
         if (_penumbra.Available)
         {
             var mods = _penumbra.ModList();
-            _chat.Print($"[EC] Mods: {mods.Count}");
-            _chat.Print($"[EC] Mod root: {_penumbra.ModDirectoryRoot()}");
-
-            var collection = _penumbra.PlayerCollection();
-            _chat.Print($"[EC] Player collection: {(collection?.ToString() ?? "NONE")}");
-
-            // Which of your mods replace a body emote animation? This is the
-            // auto-detection the UI will use, exercised for real.
-            var resolved = 0;
-            foreach (var (dir, name) in mods.Take(400))
-            {
-                var paths = _penumbra.ModFilePaths(dir);
-                var emote = _emotes.FromRedirectedPaths(paths);
-                if (emote is null) continue;
-
-                resolved++;
-                if (resolved <= 8)
-                    _chat.Print($"[EC]   {name}  ->  {emote.TextCommand} ({emote.Name})");
-            }
-            _chat.Print($"[EC] Mods that map to an emote: {resolved}");
+            _chat.Print($"[EC] Mods: {mods.Count}, collection {_penumbra.PlayerCollection()?.ToString() ?? "NONE"}");
+            var mapped = mods.Count(m => _emotes.FromRedirectedPaths(_penumbra.ModFilePaths(m.Key)) is not null);
+            _chat.Print($"[EC] Mods that map to an emote: {mapped}");
         }
+        _chat.Print($"[EC] Emotes: {_emotes.All.Count} performable");
+        _chat.Print($"[EC] Saved commands: {_config.Presets.Count}");
+    }
 
-        _chat.Print($"[EC] Emotes: {_emotes.All.Count} performable (pose-family excluded)");
-        var sample = _emotes.ByTimelineKey("emote/loop_emot24_loop");
-        _chat.Print($"[EC] loop_emot24_loop -> {(sample is null ? "NOT FOUND" : sample.TextCommand + " / " + sample.Name)}");
+    /// <summary>Chat-side wrapper around the shared import on CommandRunner.</summary>
+    private void ImportShareCode(string code)
+    {
+        try
+        {
+            var result = _runner.ImportCode(code);
+            foreach (var line in result.Messages)
+                _chat.Print("[EC] " + line);
+            _chat.Print($"[EC] Imported {result.Added} of {result.Total} command(s).");
+        }
+        catch (FormatException ex)
+        {
+            _chat.PrintError($"[EC] {ex.Message}");
+        }
     }
 
     private async Task TestRedrawAsync()
     {
-        _chat.Print("[EC] redrawing...");
         var started = Environment.TickCount64;
-        var ok = await _penumbra.RedrawAndAwaitAsync().ConfigureAwait(false);
+        var ok = await _penumbra.RedrawAndAwaitAsync(_config.RedrawTimeoutMs).ConfigureAwait(false);
         var elapsed = Environment.TickCount64 - started;
-        _chat.Print(ok
-            ? $"[EC] redraw completed in {elapsed} ms"
-            : $"[EC] redraw did NOT signal completion (waited {elapsed} ms)");
+        _chat.Print(ok ? $"[EC] redraw completed in {elapsed} ms"
+                       : $"[EC] redraw did NOT signal completion (waited {elapsed} ms)");
     }
 
     public void Dispose()
     {
-        _commands.RemoveHandler(DebugCommand);
+        _pi.UiBuilder.Draw -= _windows.Draw;
+        _pi.UiBuilder.OpenConfigUi -= ToggleWindow;
+        _pi.UiBuilder.OpenMainUi -= ToggleWindow;
+        _windows.RemoveAllWindows();
+        _configWindow.Dispose();
+
+        _runner.Dispose();
         _penumbra.Dispose();
+
+        _commands.RemoveHandler(MainCommand);
+        _commands.RemoveHandler(ShortCommand);
+        _commands.RemoveHandler(DebugCommand);
+
         _log.Information("Emote Commander unloaded.");
     }
 }

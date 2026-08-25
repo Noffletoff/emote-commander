@@ -105,8 +105,16 @@ public sealed class PenumbraBridge : IDisposable
                ?? new Dictionary<string, (string[], GroupType)>();
     }
 
-    /// <summary>What is currently selected in that mod, for the player's collection.</summary>
-    public Dictionary<string, List<string>>? CurrentSettings(string modDir)
+    /// <summary>A mod's state in the player's collection.</summary>
+    public sealed record ModState(bool Enabled, int Priority,
+                                  Dictionary<string, List<string>> Settings);
+
+    /// <summary>
+    /// Enabled, priority and selected options in one call. Everything else
+    /// reads through this so a mod's state is never fetched twice or, worse,
+    /// fetched inconsistently.
+    /// </summary>
+    public ModState? State(string modDir)
     {
         var collection = PlayerCollection();
         if (collection is null) return null;
@@ -114,10 +122,51 @@ public sealed class PenumbraBridge : IDisposable
         var (ec, settings) = _getCurrentSettings!.Invoke(collection.Value, modDir, string.Empty);
         if (ec is not PenumbraApiEc.Success || settings is null)
         {
-            _log.Debug($"current settings for {modDir}: {ec}");
+            _log.Debug($"state for {modDir}: {ec}");
             return null;
         }
-        return settings.Value.Item3;
+
+        var (enabled, priority, options, _) = settings.Value;
+        return new ModState(enabled, priority, options);
+    }
+
+    /// <summary>What is currently selected in that mod, for the player's collection.</summary>
+    public Dictionary<string, List<string>>? CurrentSettings(string modDir)
+        => State(modDir)?.Settings;
+
+    /// <summary>This mod's priority in the player's collection, or null.</summary>
+    public int? ModPriority(string modDir) => State(modDir)?.Priority;
+
+    /// <summary>
+    /// Other mods that also redirect this game path and could actually beat us
+    /// for it, with their priorities.
+    ///
+    /// ENABLED ONLY. A disabled mod redirects nothing, so counting it would
+    /// raise priority to clear an obstacle that is not there - which is exactly
+    /// what happened before this check existed.
+    /// </summary>
+    public IReadOnlyList<(string Directory, string Name, int Priority)> Conflicts(
+        string gamePath, string exceptModDir)
+    {
+        var found = new List<(string, string, int)>();
+        if (!Available || string.IsNullOrWhiteSpace(gamePath)) return found;
+
+        foreach (var (dir, name) in ModList())
+        {
+            if (string.Equals(dir, exceptModDir, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var claims = ModFilePaths(dir)
+                .Any(p => string.Equals(p, gamePath, StringComparison.OrdinalIgnoreCase));
+            if (!claims) continue;
+
+            var state = State(dir);
+            if (state is null || !state.Enabled)
+                continue;
+
+            found.Add((dir, name, state.Priority));
+        }
+        return found;
     }
 
     /// <summary>
@@ -224,7 +273,10 @@ public sealed class PenumbraBridge : IDisposable
             var ec = _setModSettings!.Invoke(
                 collection.Value, modDir, group, options, string.Empty);
 
-            if (ec is not PenumbraApiEc.Success)
+            // NothingChanged means it already had that value - a success as
+            // far as the caller is concerned, and the normal result when the
+            // same command is fired twice.
+            if (ec is not (PenumbraApiEc.Success or PenumbraApiEc.NothingChanged))
             {
                 _log.Warning($"apply {modDir} / '{group}' -> {ec}");
                 failed.Add(group);
@@ -240,9 +292,12 @@ public sealed class PenumbraBridge : IDisposable
         if (collection is null) return false;
 
         var ec = _setModPriority!.Invoke(collection.Value, modDir, priority, string.Empty);
-        if (ec is not PenumbraApiEc.Success)
+        if (ec is not (PenumbraApiEc.Success or PenumbraApiEc.NothingChanged))
+        {
             _log.Warning($"priority {modDir} -> {priority}: {ec}");
-        return ec is PenumbraApiEc.Success;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>
