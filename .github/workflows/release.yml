@@ -1,0 +1,62 @@
+name: Release
+
+# Publishing is deliberately tied to a tag, not to every push to main, so that
+# putting code on GitHub and releasing it to users are separate decisions.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Windows because the plugin targets net10.0-windows and links against the
+    # Dalamud desktop assemblies.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Fetch Dalamud
+        # The build needs the Dalamud dev assemblies, which are not on the
+        # runner. This is the same distribution XIVLauncher installs locally.
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+          Expand-Archive -Path dalamud.zip -DestinationPath "$env:USERPROFILE\dalamud"
+        shell: pwsh
+
+      - name: Test
+        env:
+          DALAMUD_HOME: ${{ github.workspace }}\..\dalamud
+        run: dotnet test EmoteCommander.Tests --configuration Release
+
+      - name: Build
+        env:
+          DALAMUD_HOME: ${{ github.workspace }}\..\dalamud
+        run: dotnet build EmoteCommander --configuration Release
+
+      - name: Check the version tag matches the manifest
+        # A tag that disagrees with AssemblyVersion produces a release Dalamud
+        # will refuse to offer as an update. Fail loudly here instead.
+        shell: pwsh
+        run: |
+          $manifest = Get-Content EmoteCommander/bin/Release/EmoteCommander/EmoteCommander.json | ConvertFrom-Json
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($manifest.AssemblyVersion -notlike "$tag*") {
+            throw "Tag $tag does not match manifest version $($manifest.AssemblyVersion)"
+          }
+          Write-Host "version ok: $($manifest.AssemblyVersion)"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EmoteCommander/bin/Release/EmoteCommander/latest.zip
+          generate_release_notes: true
