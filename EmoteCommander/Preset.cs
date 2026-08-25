@@ -33,8 +33,39 @@ public sealed class Preset
     /// <summary>ActionTimeline-backed emote row to perform.</summary>
     public ushort EmoteRowId { get; set; }
 
-    /// <summary>The emote pap path this preset expects to win, for conflict checks.</summary>
+    /// <summary>
+    /// Legacy single path. Kept so old presets and old share codes still load;
+    /// migrated into <see cref="EmotePapPaths"/> on use.
+    /// </summary>
     public string EmotePapPath { get; set; } = "";
+
+    /// <summary>
+    /// EVERY game path this preset's option redirects for its emote.
+    ///
+    /// One path is not enough. Many emotes are SHARED: the game loads one
+    /// race's file for everybody - Wring Hands plays c0101 (male Midlander)
+    /// even on a female Miqo'te. Recording the player's own race therefore
+    /// names a file the character never reads, so conflict detection finds
+    /// nothing while another mod visibly overrides the animation.
+    ///
+    /// Storing all of them and matching on any removes the guess entirely, and
+    /// covers per-race emotes at the same time.
+    /// </summary>
+    public List<string> EmotePapPaths { get; set; } = new();
+
+    /// <summary>All recorded paths, including a migrated legacy single one.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> AllPapPaths
+    {
+        get
+        {
+            if (EmotePapPaths.Count > 0)
+                return EmotePapPaths;
+            return string.IsNullOrWhiteSpace(EmotePapPath)
+                ? Array.Empty<string>()
+                : new[] { EmotePapPath };
+        }
+    }
 
     /// <summary>True when the user overrode the auto-detected emote by hand.</summary>
     public bool EmoteOverridden { get; set; }

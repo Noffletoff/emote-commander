@@ -30,7 +30,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string _emoteFilter = string.Empty;
     private string _command = string.Empty;
     private bool _modTargetsPose;
-    private string _emotePapPath = string.Empty;
+    private List<string> _emotePapPaths = new();
     private bool _switchToEditor;
     private bool _focusCommandField;
     private string? _confirmDeleteMod;
@@ -588,13 +588,16 @@ public sealed class ConfigWindow : Window, IDisposable
             || !_modEmotes.Any(e => e.RowId == _emote.RowId)))
             _emote = _modEmotes.FirstOrDefault();
 
-        // Record the concrete path that matched, which conflict detection and
-        // the priority bump both need.
-        _emotePapPath = _emote is null ? string.Empty
-            : paths.FirstOrDefault(p => string.Equals(
-                  EmoteResolver.TimelineKeyFromPath(p), _emote.TimelineKey,
-                  StringComparison.OrdinalIgnoreCase))
-              ?? string.Empty;
+        // Record EVERY path for this emote, not one. Many emotes are shared -
+        // the game loads c0101 Wring Hands for every race - so picking the
+        // player's own race can name a file the character never reads, and in
+        // some packs a file the game does not even ship.
+        _emotePapPaths = _emote is null
+            ? new List<string>()
+            : paths.Where(p => string.Equals(
+                       EmoteResolver.TimelineKeyFromPath(p), _emote.TimelineKey,
+                       StringComparison.OrdinalIgnoreCase))
+                   .ToList();
     }
 
     private static string SuggestCommand(string modName)
@@ -697,7 +700,7 @@ public sealed class ConfigWindow : Window, IDisposable
                 {
                     _emote = e;
                     _emoteOverridden = !modEmotes.Any(m => m.RowId == e.RowId);
-                    _emotePapPath = PathForEmote(e);
+                    _emotePapPaths = PathForEmote(e);
                 }
             }
             ImGui.EndCombo();
@@ -721,14 +724,14 @@ public sealed class ConfigWindow : Window, IDisposable
     }
 
     /// <summary>The redirected path matching an emote, for conflict checks.</summary>
-    private string PathForEmote(EmoteEntry emote)
+    private List<string> PathForEmote(EmoteEntry emote)
     {
-        if (_selectedModDir is null) return string.Empty;
+        if (_selectedModDir is null) return new List<string>();
         return _penumbra.ModFilePaths(_selectedModDir)
-                   .FirstOrDefault(p => string.Equals(
+                   .Where(p => string.Equals(
                        EmoteResolver.TimelineKeyFromPath(p), emote.TimelineKey,
                        StringComparison.OrdinalIgnoreCase))
-               ?? string.Empty;
+                   .ToList();
     }
 
     private void DrawCommandAndSave()
@@ -785,7 +788,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _selectedModDir = null;
         _selectedModName = string.Empty;
         _emote = null;
-        _emotePapPath = string.Empty;
+        _emotePapPaths.Clear();
         _emoteOverridden = false;
         _modTargetsPose = false;
         _modEmotes = System.Array.Empty<EmoteEntry>();
@@ -844,7 +847,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ModName = _selectedModName,
             Settings = _selection.ToDictionary(kv => kv.Key, kv => new List<string>(kv.Value)),
             EmoteRowId = _emote!.RowId,
-            EmotePapPath = _emotePapPath,
+            EmotePapPaths = new List<string>(_emotePapPaths),
             EmoteOverridden = _emoteOverridden,
         };
 
@@ -876,7 +879,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         RefreshEmotesForSelection();
         if (preset.EmotePapPath.Length > 0)
-            _emotePapPath = preset.EmotePapPath;
+            _emotePapPaths = preset.AllPapPaths.ToList();
         var paths = _penumbra.ModFilePaths(preset.ModDirectory);
         _showAllEmotes = _emote is not null
                       && !_modEmotes.Any(m => m.RowId == _emote.RowId);

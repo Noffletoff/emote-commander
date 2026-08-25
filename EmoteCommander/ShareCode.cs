@@ -147,6 +147,12 @@ public static partial class ShareCode
         preset.ModName = Clean(preset.ModName, 128);
         preset.EmotePapPath = Clean(preset.EmotePapPath, 260);
 
+        preset.EmotePapPaths = (preset.EmotePapPaths ?? new List<string>())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => Clean(p, 260))
+            .Take(64)                       // 18 races is the realistic ceiling
+            .ToList();
+
         var settings = preset.Settings;
         preset.Settings = new Dictionary<string, List<string>>();
         if (settings is null)

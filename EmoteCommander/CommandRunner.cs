@@ -307,10 +307,10 @@ public sealed class CommandRunner : IDisposable
     /// </summary>
     private bool RaiseAboveConflicts(Preset preset)
     {
-        if (string.IsNullOrWhiteSpace(preset.EmotePapPath))
+        if (preset.AllPapPaths.Count == 0)
             return false;
 
-        var conflicts = _penumbra.Conflicts(preset.EmotePapPath, preset.ModDirectory);
+        var conflicts = _penumbra.Conflicts(preset.AllPapPaths, preset.ModDirectory);
         if (conflicts.Count == 0)
             return false;
 
@@ -374,7 +374,7 @@ public sealed class CommandRunner : IDisposable
 
     private void VerifyWinner(Preset preset)
     {
-        if (string.IsNullOrWhiteSpace(preset.EmotePapPath))
+        if (preset.AllPapPaths.Count == 0)
             return;
 
         // GetPlayerResourcePaths is keyed by the ACTUAL file, whose value is the
@@ -382,12 +382,16 @@ public sealed class CommandRunner : IDisposable
         // game path up as a key silently missed every real conflict and warned
         // about vanilla instead.
         var resolved = _penumbra.PlayerResourcePaths();
-        var want = Normalise(preset.EmotePapPath);
+
+        // Match ANY recorded path: a shared emote resolves under one race's
+        // path for every character, so the player's own race is often not the
+        // one actually loaded.
+        var want = new HashSet<string>(preset.AllPapPaths.Select(Normalise));
 
         string? actual = null;
         foreach (var (file, gamePaths) in resolved)
         {
-            if (gamePaths.Any(g => Normalise(g) == want))
+            if (gamePaths.Any(g => want.Contains(Normalise(g))))
             {
                 actual = file;
                 break;

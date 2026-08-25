@@ -154,18 +154,25 @@ public sealed class PenumbraBridge : IDisposable
     /// what happened before this check existed.
     /// </summary>
     public IReadOnlyList<(string Directory, string Name, int Priority)> Conflicts(
-        string gamePath, string exceptModDir)
+        IEnumerable<string> gamePaths, string exceptModDir)
     {
         var found = new List<(string, string, int)>();
-        if (!Available || string.IsNullOrWhiteSpace(gamePath)) return found;
+        if (!Available) return found;
+
+        // Normalised set: mod json is written by several different tools, and a
+        // preset may carry paths for many races because some emotes are SHARED
+        // (the game loads c0101 Wring Hands for everyone). A claim on ANY of
+        // them is a real conflict.
+        var wanted = new HashSet<string>(
+            gamePaths.Where(p => !string.IsNullOrWhiteSpace(p)).Select(EmoteResolver.NormalisePath));
+        if (wanted.Count == 0) return found;
 
         foreach (var (dir, name) in ModList())
         {
             if (string.Equals(dir, exceptModDir, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var claims = ModFilePaths(dir)
-                .Any(p => string.Equals(p, gamePath, StringComparison.OrdinalIgnoreCase));
+            var claims = ModFilePaths(dir).Any(p => wanted.Contains(EmoteResolver.NormalisePath(p)));
             if (!claims) continue;
 
             var state = State(dir);

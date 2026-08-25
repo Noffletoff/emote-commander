@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
@@ -178,20 +179,26 @@ public sealed class Plugin : IDalamudPlugin
 
         _chat.Print($"[EC] {preset.SlashCommand} -> {preset.ModName}");
 
-        if (string.IsNullOrWhiteSpace(preset.EmotePapPath))
+        var paths = preset.AllPapPaths;
+        if (paths.Count == 0)
         {
             _chat.PrintError("[EC]   no pap path recorded, so conflict handling "
                            + "cannot run at all. Re-save this command in the editor.");
             return;
         }
-        _chat.Print($"[EC]   path: {preset.EmotePapPath}");
+
+        _chat.Print($"[EC]   {paths.Count} path(s) recorded:");
+        foreach (var path in paths.Take(4))
+            _chat.Print($"[EC]      {path}");
+        if (paths.Count > 4)
+            _chat.Print($"[EC]      ... and {paths.Count - 4} more");
 
         var mine = _penumbra.State(preset.ModDirectory);
         _chat.Print(mine is null
             ? "[EC]   this mod: NOT FOUND in your collection"
             : $"[EC]   this mod: enabled={mine.Enabled} priority={mine.Priority}");
 
-        var conflicts = _penumbra.Conflicts(preset.EmotePapPath, preset.ModDirectory);
+        var conflicts = _penumbra.Conflicts(paths, preset.ModDirectory);
         if (conflicts.Count == 0)
         {
             _chat.Print("[EC]   no other ENABLED mod claims that path.");
@@ -209,25 +216,29 @@ public sealed class Plugin : IDalamudPlugin
                 : $"[EC]   would raise {ours} -> {highest + 1}.");
         }
 
-        // Ground truth: what is actually resolving right now.
+        // Ground truth: what is actually resolving right now, matched against
+        // ANY recorded path - a shared emote loads one race's file for everyone.
         var resolved = _penumbra.PlayerResourcePaths();
-        var want = preset.EmotePapPath.Replace('\\', '/').ToLowerInvariant();
+        var want = new HashSet<string>(paths.Select(EmoteResolver.NormalisePath));
         var hit = resolved.FirstOrDefault(kv => kv.Value.Any(g =>
-            string.Equals(g.Replace('\\', '/'), want, StringComparison.OrdinalIgnoreCase)));
+            want.Contains(EmoteResolver.NormalisePath(g))));
 
         if (hit.Key is not null)
         {
-            _chat.Print($"[EC]   currently resolves to: {hit.Key}");
+            var which = hit.Value.FirstOrDefault(g =>
+                want.Contains(EmoteResolver.NormalisePath(g)));
+            _chat.Print($"[EC]   live: {which}");
+            _chat.Print($"[EC]   resolves to: {hit.Key}");
         }
         else
         {
-            _chat.Print("[EC]   that exact path is not loaded by your character.");
+            _chat.Print("[EC]   none of those paths are loaded by your character.");
 
-            // The recorded path names one race. If the character actually loads
-            // a DIFFERENT race's copy of the same emote, the whole check has
-            // been looking in the wrong place - so search for the emote by name
-            // across every race and say what is really live.
-            var file = System.IO.Path.GetFileName(want);
+            // Search for the emote by filename across every race, so a shared
+            // emote loading under a race we did not record is visible rather
+            // than looking like "nothing is happening".
+            var file = System.IO.Path.GetFileName(
+                EmoteResolver.NormalisePath(paths[0]));
             var others = resolved
                 .SelectMany(kv => kv.Value.Select(g => (Actual: kv.Key, Game: g.Replace('\\', '/'))))
                 .Where(x => x.Game.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))

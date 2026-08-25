@@ -50,6 +50,17 @@ public static partial class EmoteResolver
     }
 
     /// <summary>
+    /// Canonical form of a game path for comparison.
+    ///
+    /// Mod json is written by several different tools, so separators and case
+    /// both vary in the wild. Comparing raw strings makes real conflicts
+    /// invisible - which is how a mod could visibly override an emote while the
+    /// plugin reported that nothing claimed it.
+    /// </summary>
+    public static string NormalisePath(string? path)
+        => (path ?? string.Empty).Replace('\\', '/').ToLowerInvariant();
+
+    /// <summary>
     /// Whether this timeline key belongs to the pose family. Callers must
     /// refuse these.
     /// </summary>
