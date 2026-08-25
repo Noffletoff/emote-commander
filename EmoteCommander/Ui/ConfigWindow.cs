@@ -32,6 +32,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool _modTargetsPose;
     private string _emotePapPath = string.Empty;
     private bool _switchToEditor;
+    private bool _focusCommandField;
     private string? _drawError;
 
     /// <summary>
@@ -203,6 +204,10 @@ public sealed class ConfigWindow : Window, IDisposable
                     {
                         LoadForEdit(preset);
                         _switchToEditor = true;
+                        // Renaming is the usual reason to press Edit, and the
+                        // field sits below the mod picker, every option group
+                        // and the emote picker - well off screen on a long mod.
+                        _focusCommandField = true;
                     }
                     ImGui.SameLine();
                     if (ImGui.Button("X")) remove = preset;
@@ -682,7 +687,20 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         ImGui.TextUnformatted("Command name:");
         ImGui.SetNextItemWidth(240);
+
+        // Must be called immediately before the widget it focuses.
+        if (_focusCommandField)
+            ImGui.SetKeyboardFocusHere();
+
         ImGui.InputText("##command", ref _command, 64);
+
+        if (_focusCommandField)
+        {
+            // Centre it rather than scrolling it to the very edge.
+            ImGui.SetScrollHereY(0.5f);
+            _focusCommandField = false;
+        }
+
         ImGui.SameLine();
         ImGui.TextDisabled(_command.Length > 0 ? "/" + _command.TrimStart('/') : "");
 
