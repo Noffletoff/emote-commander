@@ -1,0 +1,10 @@
+{
+  "Name": "Emote Commander",
+  "Author": "Noffletoff",
+  "Punchline": "Bind your own slash commands to your animation mods.",
+  "Description": "Applies a saved Penumbra preset, redraws, and performs the vanilla emote that mod replaces - so your custom animation plays from a command of your choosing.",
+  "ApplicableVersion": "any",
+  "Tags": [ "penumbra", "emote", "animation" ],
+  "CategoryTags": [ "other" ],
+  "IconUrl": ""
+}

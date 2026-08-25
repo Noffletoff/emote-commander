@@ -1,0 +1,17 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Version>0.1.0.0</Version>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>EmoteCommander</AssemblyName>
+    <RootNamespace>EmoteCommander</RootNamespace>
+    <Description>Bind your own slash commands to your animation mods.</Description>
+    <Authors>Noffletoff</Authors>
+    <!-- FFXIV and Dalamud are Windows-only; the platform-compatibility
+         analyser has nothing useful to say about this project. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+</Project>
