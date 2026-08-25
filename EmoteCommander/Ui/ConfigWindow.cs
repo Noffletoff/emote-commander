@@ -30,6 +30,8 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool _modTargetsPose;
     private string _emotePapPath = string.Empty;
     private bool _switchToEditor;
+    private bool _showAllEmotes;
+    private IReadOnlyList<EmoteEntry> _modEmotes = System.Array.Empty<EmoteEntry>();
     private string? _status;
 
     private List<KeyValuePair<string, string>>? _modCache;
@@ -343,7 +345,9 @@ public sealed class ConfigWindow : Window, IDisposable
             _selection[group] = new List<string>(options);
 
         var paths = _penumbra.ModFilePaths(dir);
-        _emote = _emotes.FromRedirectedPaths(paths);
+        _modEmotes = _emotes.AllFromRedirectedPaths(paths);
+        _showAllEmotes = false;
+        _emote = _modEmotes.FirstOrDefault();
         _modTargetsPose = paths.Select(EmoteResolver.TimelineKeyFromPath)
                                .Any(k => k is not null && EmoteResolver.IsPoseFamily(k));
 
@@ -420,19 +424,32 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawEmotePicker()
     {
         ImGui.TextUnformatted("Emote to perform:");
-        if (_emote is null && !_emoteOverridden)
+
+        // Only the emotes this mod actually replaces. Offering all ~293 lets
+        // you bind a command to an emote the mod never touches, which fires a
+        // vanilla animation and looks broken with nothing to explain it.
+        var modEmotes = _modEmotes;
+        var showAll = _showAllEmotes || modEmotes.Count == 0;
+
+        if (modEmotes.Count == 0)
             ImGui.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f),
-                "Could not work this out from the mod - pick one below.");
+                "This mod does not replace any body emote animation. "
+                + "A command will play the vanilla emote.");
 
         var label = _emote is null ? "Select an emote" : $"{_emote.TextCommand}  ({_emote.Name})";
         ImGui.SetNextItemWidth(-1);
         if (ImGui.BeginCombo("##emote", label))
         {
-            ImGui.SetNextItemWidth(-1);
-            ImGui.InputTextWithHint("##emotefilter", "Filter emotes...", ref _emoteFilter, 128);
+            var source = showAll ? _emotes.All : modEmotes;
 
-            foreach (var e in _emotes.All
-                         .Where(e => _emoteFilter.Length == 0
+            if (showAll)
+            {
+                ImGui.SetNextItemWidth(-1);
+                ImGui.InputTextWithHint("##emotefilter", "Filter emotes...", ref _emoteFilter, 128);
+            }
+
+            foreach (var e in source
+                         .Where(e => !showAll || _emoteFilter.Length == 0
                                   || e.Name.Contains(_emoteFilter, StringComparison.OrdinalIgnoreCase)
                                   || e.TextCommand.Contains(_emoteFilter, StringComparison.OrdinalIgnoreCase))
                          .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
@@ -441,13 +458,39 @@ public sealed class ConfigWindow : Window, IDisposable
                 if (ImGui.Selectable($"{e.TextCommand}  ({e.Name})", e.RowId == _emote?.RowId))
                 {
                     _emote = e;
-                    _emoteOverridden = true;
+                    _emoteOverridden = !modEmotes.Any(m => m.RowId == e.RowId);
+                    _emotePapPath = PathForEmote(e);
                 }
             }
             ImGui.EndCombo();
         }
+
+        if (modEmotes.Count > 0)
+        {
+            var all = _showAllEmotes;
+            if (ImGui.Checkbox("Show every emote", ref all))
+                _showAllEmotes = all;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(
+                    $"This mod replaces {modEmotes.Count} emote(s). Ticking this lets you "
+                    + "pick any emote, but one the mod does not replace will play the "
+                    + "vanilla animation.");
+        }
+
         if (_emoteOverridden)
-            ImGui.TextDisabled("Chosen by hand, not detected from the mod.");
+            ImGui.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f),
+                "This emote is not replaced by this mod.");
+    }
+
+    /// <summary>The redirected path matching an emote, for conflict checks.</summary>
+    private string PathForEmote(EmoteEntry emote)
+    {
+        if (_selectedModDir is null) return string.Empty;
+        return _penumbra.ModFilePaths(_selectedModDir)
+                   .FirstOrDefault(p => string.Equals(
+                       EmoteResolver.TimelineKeyFromPath(p), emote.TimelineKey,
+                       StringComparison.OrdinalIgnoreCase))
+               ?? string.Empty;
     }
 
     private void DrawCommandAndSave()
@@ -535,6 +578,9 @@ public sealed class ConfigWindow : Window, IDisposable
 
         _emotePapPath = preset.EmotePapPath;
         var paths = _penumbra.ModFilePaths(preset.ModDirectory);
+        _modEmotes = _emotes.AllFromRedirectedPaths(paths);
+        _showAllEmotes = _emote is not null
+                      && !_modEmotes.Any(m => m.RowId == _emote.RowId);
         _modTargetsPose = paths.Select(EmoteResolver.TimelineKeyFromPath)
                                .Any(k => k is not null && EmoteResolver.IsPoseFamily(k));
     }

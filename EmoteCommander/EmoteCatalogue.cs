@@ -90,8 +90,24 @@ public sealed class EmoteCatalogue
     /// Returns null when the mod replaces no body emote animation.
     /// </summary>
     public EmoteEntry? FromRedirectedPaths(IEnumerable<string> gamePaths)
+        => AllFromRedirectedPaths(gamePaths).FirstOrDefault();
+
+    /// <summary>
+    /// EVERY emote a mod replaces, deduplicated and in name order.
+    ///
+    /// A mod commonly redirects the same emote for many races, and some replace
+    /// several different emotes. The editor offers this list rather than all
+    /// ~293 emotes, because binding a command to an emote the mod does not
+    /// touch produces a command that fires a vanilla animation and looks broken
+    /// for no visible reason.
+    /// </summary>
+    public IReadOnlyList<EmoteEntry> AllFromRedirectedPaths(IEnumerable<string> gamePaths)
         => gamePaths.Select(EmoteResolver.TimelineKeyFromPath)
                     .Where(k => k is not null)
                     .Select(ByTimelineKey)
-                    .FirstOrDefault(e => e is not null);
+                    .Where(e => e is not null)
+                    .Select(e => e!)
+                    .DistinctBy(e => e.RowId)
+                    .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
 }
