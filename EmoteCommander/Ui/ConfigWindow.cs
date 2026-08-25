@@ -33,6 +33,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string _emotePapPath = string.Empty;
     private bool _switchToEditor;
     private bool _focusCommandField;
+    private string? _confirmDeleteMod;
     private string? _drawError;
 
     /// <summary>
@@ -162,7 +163,10 @@ public sealed class ConfigWindow : Window, IDisposable
 
         // Grouped by mod: one mod usually owns several commands, and a flat
         // list stops being readable the moment you have more than a handful.
+        // Deletions are collected and applied AFTER the loop - removing from
+        // the list being enumerated would throw mid-frame and unbalance ImGui.
         Preset? remove = null;
+        string? removeMod = null;
 
         var byMod = _config.Presets
             .GroupBy(p => p.ModName, StringComparer.OrdinalIgnoreCase)
@@ -175,6 +179,30 @@ public sealed class ConfigWindow : Window, IDisposable
                 continue;
 
             ImGui.PushID(group.Key);
+
+            // Removing a whole mod's commands one row at a time is painful
+            // once a megapack has contributed a dozen or more.
+            var pending = string.Equals(_confirmDeleteMod, group.Key,
+                                        StringComparison.OrdinalIgnoreCase);
+            if (pending)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.5f, 0.5f, 1f),
+                    $"Remove all {group.Count()} commands for this mod?");
+                ImGui.SameLine();
+                if (ImGui.Button("Yes, remove them"))
+                {
+                    removeMod = group.Key;
+                    _confirmDeleteMod = null;
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel"))
+                    _confirmDeleteMod = null;
+            }
+            else if (ImGui.SmallButton($"Remove all {group.Count()}"))
+            {
+                _confirmDeleteMod = group.Key;
+            }
+
             if (ImGui.BeginTable("##presets", 3,
                     ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
             {
@@ -225,6 +253,26 @@ public sealed class ConfigWindow : Window, IDisposable
             _runner.Unregister(remove.Command);
             _config.Presets.Remove(remove);
             _config.Save();
+        }
+
+        if (removeMod is not null)
+        {
+            var doomed = _config.Presets
+                .Where(p => string.Equals(p.ModName, removeMod, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var preset in doomed)
+            {
+                _runner.Unregister(preset.Command);
+                _config.Presets.Remove(preset);
+
+                // If one of them is loaded in the editor, stop editing it -
+                // saving afterwards would otherwise resurrect it.
+                if (ReferenceEquals(preset, _editing))
+                    _editing = null;
+            }
+            _config.Save();
+            _status = $"Removed {doomed.Count} command(s) for '{removeMod}'.";
         }
     }
 
