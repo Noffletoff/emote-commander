@@ -3,7 +3,7 @@
     "Author": "Noffletoff",
     "Name": "Emote Commander",
     "InternalName": "EmoteCommander",
-    "AssemblyVersion": "0.1.0.0",
+    "AssemblyVersion": "0.2.0.0",
     "Description": "Bind your own slash command to a Penumbra preset and a vanilla emote. Typing the command applies the mod options, redraws, and performs the emote - so your custom animation plays without opening Penumbra mid-scene. Other players see it through the sync service they already use.",
     "Punchline": "Bind your own slash commands to your animation mods.",
     "ApplicableVersion": "any",
