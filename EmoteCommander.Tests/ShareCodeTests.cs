@@ -12,7 +12,6 @@ public class ShareCodeTests
         ModName = "Noff Smoking Idle",
         EmoteRowId = 42,
         EmotePapPath = "chara/human/c0801/animation/a0001/bt_common/emote/loop_emot24_loop.pap",
-        RaisePriority = true,
         Settings =
         {
             ["Face Pap"] = new() { "FMiqo Face Pap" },
@@ -29,7 +28,6 @@ public class ShareCodeTests
         Assert.Equal("noff_smoking_idle", p.ModDirectory);
         Assert.Equal("Noff Smoking Idle", p.ModName);
         Assert.Equal((ushort)42, p.EmoteRowId);
-        Assert.True(p.RaisePriority);
         Assert.Equal(new[] { "FMiqo Face Pap" }, p.Settings["Face Pap"]);
         Assert.Equal(new[] { "On" }, p.Settings["Bulge"]);
     }

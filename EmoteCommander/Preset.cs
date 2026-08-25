@@ -39,9 +39,6 @@ public sealed class Preset
     /// <summary>True when the user overrode the auto-detected emote by hand.</summary>
     public bool EmoteOverridden { get; set; }
 
-    /// <summary>Opt in to raising this mod's priority above conflicting mods.</summary>
-    public bool RaisePriority { get; set; }
-
     /// <summary>The command as typed, with its leading slash.</summary>
     /// <remarks>Derived, so kept out of share codes and the config file.</remarks>
     [JsonIgnore]

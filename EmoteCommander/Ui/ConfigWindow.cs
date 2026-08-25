@@ -27,7 +27,6 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool _emoteOverridden;
     private string _emoteFilter = string.Empty;
     private string _command = string.Empty;
-    private bool _raisePriority;
     private bool _modTargetsPose;
     private string _emotePapPath = string.Empty;
     private bool _switchToEditor;
@@ -459,11 +458,8 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.SameLine();
         ImGui.TextDisabled(_command.Length > 0 ? "/" + _command.TrimStart('/') : "");
 
-        ImGui.Checkbox("Raise this mod's priority when the command runs", ref _raisePriority);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(
-                "Only tick this if another mod overrides the same emote.\n"
-                + "It changes your Penumbra priorities, so it is off by default.");
+        // Priority is a single global setting on the Commands tab - it
+        // describes how the mod setup should behave, not one command.
 
         var problem = Validate();
         if (problem is not null)
@@ -514,7 +510,6 @@ public sealed class ConfigWindow : Window, IDisposable
             EmoteRowId = _emote!.RowId,
             EmotePapPath = _emotePapPath,
             EmoteOverridden = _emoteOverridden,
-            RaisePriority = _raisePriority,
         };
 
         _config.Presets.Add(preset);
@@ -530,7 +525,6 @@ public sealed class ConfigWindow : Window, IDisposable
         _selectedModDir = preset.ModDirectory;
         _selectedModName = preset.ModName;
         _command = preset.Command;
-        _raisePriority = preset.RaisePriority;
         _emote = _emotes.ByRowId(preset.EmoteRowId);
         _emoteOverridden = preset.EmoteOverridden;
         _status = null;

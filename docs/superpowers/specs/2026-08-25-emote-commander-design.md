@@ -191,6 +191,18 @@ locally.
 
 ## Out of scope
 
+- **Writing macros for the user.** Considered and rejected 2026-08-25. A button
+  that generates a macro for a command is convenient, but macro slots are finite
+  and already full of the user's own macros, so anything that picks a slot will
+  eventually overwrite something they cared about — silently, and without them
+  connecting it to this plugin. Not worth the trouble for a convenience feature.
+  Users can write a two-line macro themselves:
+
+      /micon Wring Hands emote
+      /smokethrob
+
+  Drag-to-hotbar is doubly out: the hotbar is game UI, not ImGui, so there is
+  nothing to drop onto.
 - Pose-index / `/cpose` emotes (constraint 1)
 - Presets spanning multiple mods — one mod per preset for now
 - Playing animations on anyone but the local player
