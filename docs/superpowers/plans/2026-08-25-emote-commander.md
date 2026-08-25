@@ -10,6 +10,25 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-25-emote-commander-design.md`
 
+## Progress — 2026-08-25
+
+| task | state |
+|---|---|
+| 1 — scaffold that loads in game | **done**, confirmed loading (the two "no UI callback" validation warnings are expected until Task 10) |
+| 2 — emote resolver | **done**, 15 tests |
+| 4 — preset store | **done**, 16 tests |
+| 11 — share codes | **done**, 15 tests |
+| 3, 5, 6, 7, 8, 9, 10, 12 | not started — all need the game or Penumbra running |
+
+46 unit tests passing. Everything buildable without FFXIV is finished; the next
+task needing no game is none — from here on the game must be running.
+
+Run tests: `& "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe" test` from
+`EmoteCommander.Tests/`. Build and deploy: build from `EmoteCommander/`, then
+copy `bin\Debug\*` to `%APPDATA%\XIVLauncher\devPlugins\EmoteCommander\`.
+
+Local git repo initialised; baseline committed. No remote, no GitHub.
+
 ## Global Constraints
 
 - **.NET 10** — Dalamud 15.0.3.2 targets `net10.0`. The SDK is NOT currently installed on this machine; install before Task 1.

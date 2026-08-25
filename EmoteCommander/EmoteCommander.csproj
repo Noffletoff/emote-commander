@@ -1,7 +1,11 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- -windows because Penumbra.Api targets net10.0-windows7.0, and because
+         a Dalamud plugin is Windows-only anyway. Using the honest TFM also
+         satisfies the platform-compatibility analyser properly, rather than
+         suppressing CA1416. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Version>0.1.0.0</Version>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -9,9 +13,12 @@
     <RootNamespace>EmoteCommander</RootNamespace>
     <Description>Bind your own slash commands to your animation mods.</Description>
     <Authors>Noffletoff</Authors>
-    <!-- FFXIV and Dalamud are Windows-only; the platform-compatibility
-         analyser has nothing useful to say about this project. -->
-    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- API version 5.x, matching the ".V5" IPC subscriber names found in the
+         Penumbra.Api.dll shipped alongside the installed Penumbra 1.6.1.12. -->
+    <PackageReference Include="Penumbra.Api" Version="5.15.1" />
+  </ItemGroup>
 
 </Project>
