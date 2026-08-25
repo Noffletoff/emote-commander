@@ -18,6 +18,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly EmoteCatalogue _emotes;
     private readonly CommandRunner _runner;
     private readonly Dalamud.Plugin.Services.IPluginLog _log;
+    private readonly PresetImporter _importer;
 
     // -- editor state ----------------------------------------------------
     private string _modFilter = string.Empty;
@@ -49,7 +50,8 @@ public sealed class ConfigWindow : Window, IDisposable
     private List<KeyValuePair<string, string>>? _modCache;
 
     public ConfigWindow(Config config, PenumbraBridge penumbra, EmoteCatalogue emotes,
-                        CommandRunner runner, Dalamud.Plugin.Services.IPluginLog log)
+                        CommandRunner runner, Dalamud.Plugin.Services.IPluginLog log,
+                        PresetImporter importer)
         : base("Emote Commander###EmoteCommanderConfig")
     {
         _config = config;
@@ -57,6 +59,7 @@ public sealed class ConfigWindow : Window, IDisposable
         _emotes = emotes;
         _runner = runner;
         _log = log;
+        _importer = importer;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -235,6 +238,9 @@ public sealed class ConfigWindow : Window, IDisposable
             + "description so it travels with the mod.");
 
         ImGui.Separator();
+        DrawDiscovered();
+
+        ImGui.Separator();
         ImGui.TextUnformatted("Import");
 
         ImGui.SetNextItemWidth(-1);
@@ -289,6 +295,99 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.Button("Copy to clipboard"))
             ImGui.SetClipboardText(_exportBox);
+    }
+
+    // -- discovery from mod descriptions ---------------------------------
+
+    private List<DiscoveredPreset>? _discovered;
+    private readonly HashSet<string> _ticked = new(StringComparer.OrdinalIgnoreCase);
+    private string? _scanStatus;
+
+    private void DrawDiscovered()
+    {
+        ImGui.TextUnformatted("From your installed mods");
+        ImGui.SameLine();
+        if (ImGui.Button("Scan mod descriptions"))
+            RunScan();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(
+                "Looks through every installed mod's Penumbra description for "
+                + "commands the mod author included. Nothing is added until you "
+                + "tick it and press Add.");
+
+        if (_scanStatus is not null)
+            ImGui.TextDisabled(_scanStatus);
+
+        if (_discovered is null || _discovered.Count == 0)
+            return;
+
+        var addable = _discovered.Where(d => d.CanAdd).ToList();
+        var blocked = _discovered.Where(d => !d.CanAdd).ToList();
+
+        foreach (var d in addable)
+        {
+            var key = d.Preset.Command + "|" + d.SourceModDirectory;
+            var on = _ticked.Contains(key);
+            if (ImGui.Checkbox($"{d.Preset.SlashCommand}##{key}", ref on))
+            {
+                if (on) _ticked.Add(key); else _ticked.Remove(key);
+            }
+            ImGui.SameLine();
+            ImGui.TextDisabled($"-> {d.Preset.ModName}");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"offered by: {d.SourceModName}\nmod folder: {d.Preset.ModDirectory}");
+        }
+
+        if (addable.Count > 0)
+        {
+            ImGui.BeginDisabled(_ticked.Count == 0);
+            if (ImGui.Button($"Add {_ticked.Count} selected"))
+                AddTicked(addable);
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            if (ImGui.Button("Select all"))
+                foreach (var d in addable)
+                    _ticked.Add(d.Preset.Command + "|" + d.SourceModDirectory);
+        }
+
+        // Shown, not hidden: a command that silently fails to appear is worse
+        // than one that says why it cannot be added.
+        if (blocked.Count > 0 && ImGui.CollapsingHeader($"Not addable ({blocked.Count})"))
+        {
+            foreach (var d in blocked)
+            {
+                ImGui.TextUnformatted(d.Preset.SlashCommand.Length > 1
+                    ? d.Preset.SlashCommand : "(no command)");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"[{d.SourceModName}] {d.Problem}");
+            }
+        }
+    }
+
+    private void RunScan()
+    {
+        _ticked.Clear();
+        _discovered = _importer.Scan().ToList();
+        var addable = _discovered.Count(d => d.CanAdd);
+        _scanStatus = _discovered.Count == 0
+            ? "No mods offer commands. Authors add them by putting a share code in the mod's description."
+            : $"Found {_discovered.Count} in mod descriptions, {addable} addable.";
+    }
+
+    private void AddTicked(List<DiscoveredPreset> addable)
+    {
+        var added = 0;
+        foreach (var d in addable)
+        {
+            var key = d.Preset.Command + "|" + d.SourceModDirectory;
+            if (!_ticked.Contains(key)) continue;
+
+            _config.Presets.Add(d.Preset);
+            if (_runner.Register(d.Preset)) added++;
+        }
+        _config.Save();
+        _scanStatus = $"Added {added} command(s).";
+        RunScan();      // refresh so they now show as "already added"
     }
 
     private void DoImport()
@@ -385,23 +484,64 @@ public sealed class ConfigWindow : Window, IDisposable
         foreach (var (group, options) in _penumbra.CurrentSettings(dir) ?? new())
             _selection[group] = new List<string>(options);
 
-        var paths = _penumbra.ModFilePaths(dir);
-        _modEmotes = _emotes.AllFromRedirectedPaths(paths);
         _showAllEmotes = false;
-        _emote = _modEmotes.FirstOrDefault();
+        RefreshEmotesForSelection();
+
+        var paths = _penumbra.ModFilePaths(dir);
         _modTargetsPose = paths.Select(EmoteResolver.TimelineKeyFromPath)
                                .Any(k => k is not null && EmoteResolver.IsPoseFamily(k));
 
-        // Remember the exact path that matched. Conflict detection and the
-        // priority bump both need a concrete game path, not just an emote.
-        _emotePapPath = _emote is null ? string.Empty
-            : paths.FirstOrDefault(p =>
-                  string.Equals(EmoteResolver.TimelineKeyFromPath(p), _emote.TimelineKey,
-                                StringComparison.OrdinalIgnoreCase))
-              ?? string.Empty;
-
         if (_command.Length == 0 && _emote is not null)
             _command = SuggestCommand(name);
+    }
+
+    /// <summary>
+    /// Work out which emotes the CURRENT option selection replaces, and pick
+    /// one if the answer is unambiguous.
+    ///
+    /// Resolving against the selection rather than the whole mod is what makes
+    /// a megapack workable: a pack redirecting twenty emotes in total redirects
+    /// exactly one for any given animation, so choosing "Crazy Riding" should
+    /// narrow the emote to wring hands rather than offering all twenty.
+    ///
+    /// Falls back to the whole mod when nothing is selected yet, so a simple
+    /// one-emote mod still auto-detects immediately.
+    /// </summary>
+    private void RefreshEmotesForSelection()
+    {
+        if (_selectedModDir is null)
+        {
+            _modEmotes = System.Array.Empty<EmoteEntry>();
+            return;
+        }
+
+        var paths = _selection.Count > 0
+            ? _penumbra.ModFilePathsForOptions(_selectedModDir, _selection)
+            : _penumbra.ModFilePaths(_selectedModDir);
+
+        // A selection that redirects nothing (all groups on "None") tells us
+        // nothing - fall back rather than showing an empty picker.
+        var narrowed = _emotes.AllFromRedirectedPaths(paths);
+        if (narrowed.Count == 0)
+        {
+            paths = _penumbra.ModFilePaths(_selectedModDir);
+            narrowed = _emotes.AllFromRedirectedPaths(paths);
+        }
+
+        _modEmotes = narrowed;
+
+        // Keep a hand-picked emote; otherwise follow the selection.
+        if (!_emoteOverridden && (_emote is null
+            || !_modEmotes.Any(e => e.RowId == _emote.RowId)))
+            _emote = _modEmotes.FirstOrDefault();
+
+        // Record the concrete path that matched, which conflict detection and
+        // the priority bump both need.
+        _emotePapPath = _emote is null ? string.Empty
+            : paths.FirstOrDefault(p => string.Equals(
+                  EmoteResolver.TimelineKeyFromPath(p), _emote.TimelineKey,
+                  StringComparison.OrdinalIgnoreCase))
+              ?? string.Empty;
     }
 
     private static string SuggestCommand(string modName)
@@ -436,7 +576,10 @@ public sealed class ConfigWindow : Window, IDisposable
                     foreach (var option in info.Options)
                     {
                         if (ImGui.Selectable(option, option == current))
+                        {
                             _selection[group] = new List<string> { option };
+                            RefreshEmotesForSelection();
+                        }
                     }
                     ImGui.EndCombo();
                 }
@@ -454,6 +597,7 @@ public sealed class ConfigWindow : Window, IDisposable
                                  ? l : _selection[group] = new List<string>();
                         if (on) { if (!list.Contains(option)) list.Add(option); }
                         else list.Remove(option);
+                        RefreshEmotesForSelection();
                     }
                 }
                 ImGui.Unindent();
@@ -664,9 +808,10 @@ public sealed class ConfigWindow : Window, IDisposable
         foreach (var (group, options) in preset.Settings)
             _selection[group] = new List<string>(options);
 
-        _emotePapPath = preset.EmotePapPath;
+        RefreshEmotesForSelection();
+        if (preset.EmotePapPath.Length > 0)
+            _emotePapPath = preset.EmotePapPath;
         var paths = _penumbra.ModFilePaths(preset.ModDirectory);
-        _modEmotes = _emotes.AllFromRedirectedPaths(paths);
         _showAllEmotes = _emote is not null
                       && !_modEmotes.Any(m => m.RowId == _emote.RowId);
         _modTargetsPose = paths.Select(EmoteResolver.TimelineKeyFromPath)

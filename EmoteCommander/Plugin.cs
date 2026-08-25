@@ -30,6 +30,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly EmoteCatalogue _emotes;
     private readonly EmotePlayer _player;
     private readonly CommandRunner _runner;
+    private readonly PresetImporter _importer;
 
     private readonly WindowSystem _windows = new("EmoteCommander");
     private readonly ConfigWindow _configWindow;
@@ -57,7 +58,8 @@ public sealed class Plugin : IDalamudPlugin
         _runner = new CommandRunner(_config, _penumbra, _emotes, _player, commands, chat,
                                     log, framework);
 
-        _configWindow = new ConfigWindow(_config, _penumbra, _emotes, _runner, log);
+        _importer = new PresetImporter(_penumbra, _config, _emotes);
+        _configWindow = new ConfigWindow(_config, _penumbra, _emotes, _runner, log, _importer);
         _windows.AddWindow(_configWindow);
 
         _pi.UiBuilder.Draw += _windows.Draw;

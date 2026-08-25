@@ -210,33 +210,8 @@ public sealed class PenumbraBridge : IDisposable
     /// </summary>
     public IReadOnlyList<string> ModFilePaths(string modDir)
     {
-        var root = ModDirectoryRoot();
-        if (string.IsNullOrEmpty(root)) return Array.Empty<string>();
-
-        // modDir can arrive from an imported share code, so it is untrusted.
-        // Without this, a crafted value like "..\..\Windows" would walk out of
-        // the Penumbra directory and enumerate json elsewhere on disk.
-        if (modDir.Contains("..", StringComparison.Ordinal)
-            || Path.IsPathRooted(modDir)
-            || modDir.IndexOfAny(new[] { '/', '\\' }) >= 0)
-        {
-            _log.Warning($"refusing suspicious mod directory: '{modDir}'");
-            return Array.Empty<string>();
-        }
-
-        var folder = Path.Combine(root, modDir);
-
-        // Belt and braces: whatever the string was, the resolved path must sit
-        // inside the Penumbra root.
-        var rootFull = Path.GetFullPath(root);
-        var folderFull = Path.GetFullPath(folder);
-        if (!folderFull.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
-        {
-            _log.Warning($"refusing mod directory outside the Penumbra root: '{modDir}'");
-            return Array.Empty<string>();
-        }
-
-        if (!Directory.Exists(folder)) return Array.Empty<string>();
+        var folder = SafeModFolder(modDir);
+        if (folder is null) return Array.Empty<string>();
 
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
@@ -256,6 +231,153 @@ public sealed class PenumbraBridge : IDisposable
         catch (Exception ex)
         {
             _log.Debug($"reading files of '{modDir}': {ex.Message}");
+        }
+        return paths.ToList();
+    }
+
+    /// <summary>
+    /// The mod's folder on disk, or null if the name is not one we will touch.
+    ///
+    /// modDir can arrive from an imported share code, so it is untrusted: a
+    /// crafted value like "..\..\Windows" would otherwise walk out of the
+    /// Penumbra directory. Shared by every disk reader so the check cannot be
+    /// forgotten by one of them.
+    /// </summary>
+    private string? SafeModFolder(string modDir)
+    {
+        var root = ModDirectoryRoot();
+        if (string.IsNullOrEmpty(root) || string.IsNullOrWhiteSpace(modDir))
+            return null;
+
+        if (modDir.Contains("..", StringComparison.Ordinal)
+            || Path.IsPathRooted(modDir)
+            || modDir.IndexOfAny(new[] { '/', '\\' }) >= 0)
+        {
+            _log.Warning($"refusing suspicious mod directory: '{modDir}'");
+            return null;
+        }
+
+        var folder = Path.Combine(root, modDir);
+
+        // Belt and braces: whatever the string was, the resolved path must sit
+        // inside the Penumbra root.
+        if (!Path.GetFullPath(folder).StartsWith(Path.GetFullPath(root),
+                                                 StringComparison.OrdinalIgnoreCase))
+        {
+            _log.Warning($"refusing mod directory outside the Penumbra root: '{modDir}'");
+            return null;
+        }
+
+        return Directory.Exists(folder) ? folder : null;
+    }
+
+    /// <summary>
+    /// A mod's Penumbra description, or empty.
+    ///
+    /// Read from the mod's own meta.json. The description is where a share code
+    /// can be embedded so it travels with the mod: Penumbra owns the field, so
+    /// unlike a sidecar file it is guaranteed to survive .pmp packing and
+    /// installation, and it can be added to mods that have already shipped.
+    ///
+    /// Description is frequently NULL rather than empty in real mod folders
+    /// (9 of 114 in a real library), so this must not assume a string.
+    /// </summary>
+    public string ModDescription(string modDir)
+    {
+        var folder = SafeModFolder(modDir);
+        if (folder is null) return string.Empty;
+
+        var meta = Path.Combine(folder, "meta.json");
+        if (!File.Exists(meta)) return string.Empty;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(meta));
+            if (doc.RootElement.ValueKind is not JsonValueKind.Object)
+                return string.Empty;
+            if (!doc.RootElement.TryGetProperty("Description", out var description))
+                return string.Empty;
+            return description.ValueKind == JsonValueKind.String
+                 ? description.GetString() ?? string.Empty
+                 : string.Empty;
+        }
+        catch (Exception ex)
+        {
+            // Runs across every installed mod; one unreadable meta.json must
+            // not break the scan, and must not spam the log either.
+            _log.Debug($"reading description of '{modDir}': {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// The game paths a mod redirects GIVEN a particular set of option
+    /// selections, rather than the union across every option.
+    ///
+    /// This is what makes a megapack usable. A pack with twenty option groups
+    /// redirects twenty different emotes in total, so the union tells you
+    /// nothing about which emote a specific command will play - the picker
+    /// would list all twenty and auto-detect an arbitrary one. Resolved against
+    /// the actual selection, "Crazy Riding" narrows to the one emote it
+    /// replaces.
+    ///
+    /// Default files always count; group files count only when their option is
+    /// selected.
+    /// </summary>
+    public IReadOnlyList<string> ModFilePathsForOptions(
+        string modDir, IReadOnlyDictionary<string, List<string>> selection)
+    {
+        var folder = SafeModFolder(modDir);
+        if (folder is null) return Array.Empty<string>();
+
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(folder, "*.json",
+                                                          SearchOption.TopDirectoryOnly))
+            {
+                var name = Path.GetFileName(file);
+                using var doc = JsonDocument.Parse(File.ReadAllText(file));
+                var root = doc.RootElement;
+
+                if (name.Equals("default_mod.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    CollectFiles(root, paths);
+                    continue;
+                }
+                if (!name.StartsWith("group_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (root.ValueKind is not JsonValueKind.Object)
+                    continue;
+
+                var groupName = root.TryGetProperty("Name", out var gn)
+                             && gn.ValueKind == JsonValueKind.String
+                    ? gn.GetString() ?? string.Empty
+                    : string.Empty;
+
+                if (!selection.TryGetValue(groupName, out var chosen) || chosen is null)
+                    continue;
+
+                if (!root.TryGetProperty("Options", out var options)
+                    || options.ValueKind is not JsonValueKind.Array)
+                    continue;
+
+                foreach (var option in options.EnumerateArray())
+                {
+                    if (option.ValueKind is not JsonValueKind.Object) continue;
+                    var optionName = option.TryGetProperty("Name", out var on)
+                                  && on.ValueKind == JsonValueKind.String
+                        ? on.GetString() ?? string.Empty
+                        : string.Empty;
+
+                    if (chosen.Contains(optionName, StringComparer.OrdinalIgnoreCase))
+                        CollectFiles(option, paths);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug($"reading selected files of '{modDir}': {ex.Message}");
         }
         return paths.ToList();
     }
