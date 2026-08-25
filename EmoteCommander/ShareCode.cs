@@ -109,6 +109,9 @@ public static partial class ShareCode
                     $"Share code holds {presets.Count} commands, which is more than "
                     + $"the {MaxPresets} allowed.");
 
+            foreach (var preset in presets)
+                Sanitise(preset);
+
             return presets;
         }
         catch (FormatException)
@@ -121,6 +124,57 @@ public static partial class ShareCode
             // a bad string either way.
             throw new FormatException($"Share code could not be read: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// Make one decoded preset safe to hand to the rest of the plugin.
+    ///
+    /// JSON happily writes null over a property initialiser, so a hostile - or
+    /// merely truncated - code can produce a Preset whose Settings, Command or
+    /// names are null. Those then throw deep inside the ImGui draw loop, where
+    /// the exception skips the matching End calls and leaves ImGui's stack
+    /// unbalanced: an assert, not a logged error. Fields are also uncapped,
+    /// so a megabyte of newlines in a ModName would be printed to chat, used as
+    /// an ImGui label every frame, and written back into the config.
+    ///
+    /// Everything is fixed here, once, at the boundary - so nothing downstream
+    /// has to remember to be defensive.
+    /// </summary>
+    private static void Sanitise(Preset preset)
+    {
+        preset.Command = Clean(preset.Command, 64);
+        preset.ModDirectory = Clean(preset.ModDirectory, 260);
+        preset.ModName = Clean(preset.ModName, 128);
+        preset.EmotePapPath = Clean(preset.EmotePapPath, 260);
+
+        var settings = preset.Settings;
+        preset.Settings = new Dictionary<string, List<string>>();
+        if (settings is null)
+            return;
+
+        foreach (var (group, options) in settings)
+        {
+            if (string.IsNullOrWhiteSpace(group))
+                continue;
+
+            // A null option list would throw in new List<string>(null).
+            var cleaned = (options ?? new List<string>())
+                .Where(o => !string.IsNullOrEmpty(o))
+                .Select(o => Clean(o, 128))
+                .ToList();
+
+            preset.Settings[Clean(group, 128)] = cleaned;
+        }
+    }
+
+    /// <summary>Never null, length capped, no control characters.</summary>
+    private static string Clean(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        var stripped = new string(value.Where(c => !char.IsControl(c)).ToArray()).Trim();
+        return stripped.Length <= maxLength ? stripped : stripped[..maxLength];
     }
 
     /// <summary>

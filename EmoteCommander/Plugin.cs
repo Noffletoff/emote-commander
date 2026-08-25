@@ -39,7 +39,9 @@ public sealed class Plugin : IDalamudPlugin
         IPluginLog log,
         ICommandManager commands,
         IChatGui chat,
-        IDataManager data)
+        IDataManager data,
+        IFramework framework,
+        IObjectTable objects)
     {
         _pi = pluginInterface;
         _log = log;
@@ -50,11 +52,12 @@ public sealed class Plugin : IDalamudPlugin
         _config.Initialise(_pi);
 
         _emotes = new EmoteCatalogue(data, log);
-        _penumbra = new PenumbraBridge(_pi, log);
+        _penumbra = new PenumbraBridge(_pi, log, objects);
         _player = new EmotePlayer(log);
-        _runner = new CommandRunner(_config, _penumbra, _emotes, _player, commands, chat, log);
+        _runner = new CommandRunner(_config, _penumbra, _emotes, _player, commands, chat,
+                                    log, framework);
 
-        _configWindow = new ConfigWindow(_config, _penumbra, _emotes, _runner);
+        _configWindow = new ConfigWindow(_config, _penumbra, _emotes, _runner, log);
         _windows.AddWindow(_configWindow);
 
         _pi.UiBuilder.Draw += _windows.Draw;
@@ -160,11 +163,23 @@ public sealed class Plugin : IDalamudPlugin
 
     private async Task TestRedrawAsync()
     {
-        var started = Environment.TickCount64;
-        var ok = await _penumbra.RedrawAndAwaitAsync(_config.RedrawTimeoutMs).ConfigureAwait(false);
-        var elapsed = Environment.TickCount64 - started;
-        _chat.Print(ok ? $"[EC] redraw completed in {elapsed} ms"
-                       : $"[EC] redraw did NOT signal completion (waited {elapsed} ms)");
+        // No try/catch here meant any throw became an unobserved task
+        // exception: no chat line, no log entry. The worst possible behaviour
+        // for the command whose whole job is answering "is redraw working".
+        try
+        {
+            var started = Environment.TickCount64;
+            var ok = await _penumbra.RedrawAndAwaitAsync(_config.RedrawTimeoutMs)
+                                    .ConfigureAwait(false);
+            var elapsed = Environment.TickCount64 - started;
+            _chat.Print(ok ? $"[EC] redraw completed in {elapsed} ms"
+                           : $"[EC] redraw did NOT signal completion (waited {elapsed} ms)");
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "redraw test failed");
+            _chat.PrintError($"[EC] redraw test threw: {ex.Message}");
+        }
     }
 
     public void Dispose()

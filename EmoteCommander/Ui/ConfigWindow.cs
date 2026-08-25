@@ -17,6 +17,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly PenumbraBridge _penumbra;
     private readonly EmoteCatalogue _emotes;
     private readonly CommandRunner _runner;
+    private readonly Dalamud.Plugin.Services.IPluginLog _log;
 
     // -- editor state ----------------------------------------------------
     private string _modFilter = string.Empty;
@@ -30,6 +31,17 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool _modTargetsPose;
     private string _emotePapPath = string.Empty;
     private bool _switchToEditor;
+    private string? _drawError;
+
+    /// <summary>
+    /// The preset being edited, or null when building a new one.
+    ///
+    /// Without this the editor had to guess from the command name, and guessed
+    /// wrong both ways: renaming a command produced a duplicate because the
+    /// original was never removed, and re-pointing one at a different mod made
+    /// the preset clash with ITSELF so the Save button never appeared.
+    /// </summary>
+    private Preset? _editing;
     private bool _showAllEmotes;
     private IReadOnlyList<EmoteEntry> _modEmotes = System.Array.Empty<EmoteEntry>();
     private string? _status;
@@ -37,13 +49,14 @@ public sealed class ConfigWindow : Window, IDisposable
     private List<KeyValuePair<string, string>>? _modCache;
 
     public ConfigWindow(Config config, PenumbraBridge penumbra, EmoteCatalogue emotes,
-                        CommandRunner runner)
+                        CommandRunner runner, Dalamud.Plugin.Services.IPluginLog log)
         : base("Emote Commander###EmoteCommanderConfig")
     {
         _config = config;
         _penumbra = penumbra;
         _emotes = emotes;
         _runner = runner;
+        _log = log;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -54,6 +67,33 @@ public sealed class ConfigWindow : Window, IDisposable
 
     public override void Draw()
     {
+        // A throw anywhere below skips the matching End/Pop calls and leaves
+        // ImGui's stack unbalanced for the rest of the frame - which surfaces
+        // as an assert rather than an error anyone can read. Catch here so a
+        // bad preset degrades to a message instead.
+        try
+        {
+            DrawInner();
+        }
+        catch (Exception ex)
+        {
+            _drawError = ex.Message;
+            _log.Error(ex, "Emote Commander window draw failed");
+        }
+    }
+
+    private void DrawInner()
+    {
+        if (_drawError is not null)
+        {
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f),
+                "Something went wrong drawing this window:");
+            ImGui.TextWrapped(_drawError);
+            if (ImGui.Button("Try again"))
+                _drawError = null;
+            return;
+        }
+
         if (!_penumbra.Available)
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f),
@@ -335,6 +375,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private void SelectMod(string dir, string name)
     {
+        // Changing mod does not stop you editing the same preset.
         _selectedModDir = dir;
         _selectedModName = name;
         _selection.Clear();
@@ -504,6 +545,17 @@ public sealed class ConfigWindow : Window, IDisposable
         // Priority is a single global setting on the Commands tab - it
         // describes how the mod setup should behave, not one command.
 
+        if (_editing is not null)
+        {
+            ImGui.TextDisabled($"Editing {_editing.SlashCommand}");
+            ImGui.SameLine();
+            if (ImGui.Button("Start a new command instead"))
+            {
+                ClearEditor();
+                return;
+            }
+        }
+
         var problem = Validate();
         if (problem is not null)
         {
@@ -511,8 +563,23 @@ public sealed class ConfigWindow : Window, IDisposable
             return;
         }
 
-        if (ImGui.Button("Save command"))
+        if (ImGui.Button(_editing is null ? "Save command" : "Save changes"))
             Save();
+    }
+
+    private void ClearEditor()
+    {
+        _editing = null;
+        _command = string.Empty;
+        _selection.Clear();
+        _selectedModDir = null;
+        _selectedModName = string.Empty;
+        _emote = null;
+        _emotePapPath = string.Empty;
+        _emoteOverridden = false;
+        _modTargetsPose = false;
+        _modEmotes = System.Array.Empty<EmoteEntry>();
+        _status = null;
     }
 
     private string? Validate()
@@ -522,12 +589,19 @@ public sealed class ConfigWindow : Window, IDisposable
         catch (ArgumentException ex) { return ex.Message; }
 
         var normalised = Preset.Normalise(_command);
+
+        // Exclude the preset being edited: it is not a clash with itself.
+        // Comparing on mod directory instead made re-pointing an existing
+        // command at a different mod unsaveable.
         var clash = _config.Presets.FirstOrDefault(p =>
+            !ReferenceEquals(p, _editing) &&
             string.Equals(p.Command, normalised, StringComparison.OrdinalIgnoreCase));
-        if (clash is not null && clash.ModDirectory != _selectedModDir)
+        if (clash is not null)
             return $"/{normalised} is already used by {clash.ModName}.";
 
-        if (clash is null && !_runner.IsNameAvailable(_command))
+        var renaming = _editing is not null
+                    && !string.Equals(_editing.Command, normalised, StringComparison.OrdinalIgnoreCase);
+        if ((_editing is null || renaming) && !_runner.IsNameAvailable(_command))
             return $"/{normalised} is already taken by the game or another plugin.";
 
         return null;
@@ -536,6 +610,15 @@ public sealed class ConfigWindow : Window, IDisposable
     private void Save()
     {
         var normalised = Preset.Normalise(_command);
+
+        // Remove the preset being edited even when it is being RENAMED - the
+        // old name would otherwise stay registered and leave a duplicate.
+        if (_editing is not null)
+        {
+            _runner.Unregister(_editing.Command);
+            _config.Presets.Remove(_editing);
+        }
+
         var existing = _config.Presets.FirstOrDefault(p =>
             string.Equals(p.Command, normalised, StringComparison.OrdinalIgnoreCase));
         if (existing is not null)
@@ -561,10 +644,15 @@ public sealed class ConfigWindow : Window, IDisposable
         _status = _runner.Register(preset)
             ? $"Saved. Try /{normalised}."
             : $"Saved, but /{normalised} could not be registered - the name is taken.";
+
+        // Keep editing what was just saved, so a second Save does not create a
+        // duplicate of it.
+        _editing = preset;
     }
 
     private void LoadForEdit(Preset preset)
     {
+        _editing = preset;
         _selectedModDir = preset.ModDirectory;
         _selectedModName = preset.ModName;
         _command = preset.Command;

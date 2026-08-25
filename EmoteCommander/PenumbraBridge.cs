@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -23,6 +24,7 @@ namespace EmoteCommander;
 public sealed class PenumbraBridge : IDisposable
 {
     private readonly IPluginLog _log;
+    private readonly IObjectTable _objects;
 
     private readonly GetModList? _getModList;
     private readonly GetModDirectory? _getModDirectory;
@@ -37,7 +39,10 @@ public sealed class PenumbraBridge : IDisposable
     // disposable subscription rather than an instance of it.
     private readonly IDisposable? _characterBaseCreated;
 
+    private readonly GetEnabledState? _getEnabledState;
+
     private TaskCompletionSource<bool>? _redrawCompleted;
+    private nint _awaitedObject;
 
     /// <summary>False when Penumbra is missing or its IPC did not match.</summary>
     public bool Available { get; }
@@ -45,9 +50,11 @@ public sealed class PenumbraBridge : IDisposable
     /// <summary>Why it is unavailable, for the UI to show.</summary>
     public string? Unavailable { get; }
 
-    public PenumbraBridge(IDalamudPluginInterface pi, IPluginLog log)
+    public PenumbraBridge(IDalamudPluginInterface pi, IPluginLog log,
+                          IObjectTable objects)
     {
         _log = log;
+        _objects = objects;
         try
         {
             _getModList = new GetModList(pi);
@@ -59,6 +66,7 @@ public sealed class PenumbraBridge : IDisposable
             _setModSettings = new TrySetModSettings(pi);
             _setModPriority = new TrySetModPriority(pi);
             _redraw = new RedrawObject(pi);
+            _getEnabledState = new GetEnabledState(pi);
             _characterBaseCreated = CreatedCharacterBase.Subscriber(pi, OnCharacterBaseCreated);
 
             // Cheapest call that proves Penumbra is actually answering rather
@@ -170,11 +178,14 @@ public sealed class PenumbraBridge : IDisposable
     }
 
     /// <summary>
-    /// Game path to the file it currently resolves to for the player, after all
-    /// priority resolution. This is ground truth for "which mod actually won".
+    /// ACTUAL file on disk to the set of GAME PATHS it currently satisfies for
+    /// the player, after all priority resolution. Ground truth for "which mod
+    /// actually won".
     /// </summary>
     /// <remarks>
-    /// A game path can map to more than one resolved file, hence the set.
+    /// Note the direction: the KEY is the real file, the VALUES are game paths.
+    /// It was previously documented - and used - the other way round, which
+    /// made the conflict check miss every real conflict and warn about vanilla.
     /// </remarks>
     public Dictionary<string, HashSet<string>> PlayerResourcePaths()
     {
@@ -338,7 +349,18 @@ public sealed class PenumbraBridge : IDisposable
 
         var tcs = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Remember WHOSE redraw we are waiting for. Penumbra raises
+        // CreatedCharacterBase for every character base the game builds -
+        // passers-by, minions, mounts - so without this the wait is satisfied
+        // by a stranger loading nearby and the emote fires against a
+        // half-finished redraw. That failure is crowd-dependent: fine at home,
+        // wrong in a city.
+        // Index 0 is the local player, and index 0 is exactly what we ask
+        // Penumbra to redraw below - so compare against the same thing.
+        _awaitedObject = _objects[0]?.Address ?? nint.Zero;
         _redrawCompleted = tcs;
+
         try
         {
             _redraw!.Invoke(0, RedrawType.Redraw);
@@ -353,15 +375,44 @@ public sealed class PenumbraBridge : IDisposable
         }
         finally
         {
-            _redrawCompleted = null;
+            // Only clear our OWN registration. A plain null would destroy a
+            // later call's live registration if the two ever overlapped.
+            Interlocked.CompareExchange(ref _redrawCompleted, null, tcs);
         }
     }
 
     private void OnCharacterBaseCreated(nint gameObject, Guid collection, nint drawObject)
-        => _redrawCompleted?.TrySetResult(true);
+    {
+        var awaited = _awaitedObject;
+        if (awaited != nint.Zero && gameObject != awaited)
+            return;
+
+        _redrawCompleted?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Penumbra's master "Enable Mods" switch. When it is off every call still
+    /// reports success while Penumbra applies nothing, so a command would look
+    /// like it worked and change nothing at all.
+    /// </summary>
+    public bool ModsGloballyEnabled()
+    {
+        if (!Available) return false;
+        try { return _getEnabledState?.Invoke() ?? true; }
+        catch (Exception ex)
+        {
+            _log.Debug($"GetEnabledState failed: {ex.Message}");
+            return true;      // assume on rather than block the user
+        }
+    }
 
     public void Dispose()
     {
+        // Release anything still waiting, or a fire in flight during a plugin
+        // reload would perform a real, broadcast emote seconds later from a
+        // dead instance.
+        _redrawCompleted?.TrySetResult(false);
+        _redrawCompleted = null;
         _characterBaseCreated?.Dispose();
     }
 }

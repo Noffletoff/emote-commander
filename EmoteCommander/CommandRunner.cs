@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.Plugin.Services;
@@ -25,12 +26,24 @@ public sealed class CommandRunner : IDisposable
     private readonly ICommandManager _commands;
     private readonly IChatGui _chat;
     private readonly IPluginLog _log;
+    private readonly IFramework _framework;
 
     private readonly HashSet<string> _registered = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Only one command may run its apply/redraw/perform sequence at a time.
+    ///
+    /// Two overlapping fires corrupt each other: they share one redraw
+    /// registration, so the second overwrites the first's and both then time
+    /// out, both emotes play against a half-finished redraw, and whichever
+    /// mod options were written last are what is actually on. Two presets
+    /// cannot meaningfully play at once anyway.
+    /// </summary>
+    private readonly SemaphoreSlim _fireGate = new(1, 1);
+
     public CommandRunner(Config config, PenumbraBridge penumbra, EmoteCatalogue emotes,
                          EmotePlayer player, ICommandManager commands, IChatGui chat,
-                         IPluginLog log)
+                         IPluginLog log, IFramework framework)
     {
         _config = config;
         _penumbra = penumbra;
@@ -39,6 +52,7 @@ public sealed class CommandRunner : IDisposable
         _commands = commands;
         _chat = chat;
         _log = log;
+        _framework = framework;
     }
 
     public void RegisterAll()
@@ -87,8 +101,10 @@ public sealed class CommandRunner : IDisposable
         return true;
     }
 
-    public void Unregister(string command)
+    public void Unregister(string? command)
     {
+        if (string.IsNullOrWhiteSpace(command))
+            return;
         var name = "/" + command.TrimStart('/');
         if (_registered.Remove(name))
             _commands.RemoveHandler(name);
@@ -176,6 +192,14 @@ public sealed class CommandRunner : IDisposable
 
     public async Task FireAsync(Preset preset)
     {
+        // Refuse rather than queue: queueing would leave the user watching
+        // commands play out seconds after they typed them.
+        if (!await _fireGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            _chat.PrintError($"[EC] {preset.SlashCommand}: another command is still running.");
+            return;
+        }
+
         try
         {
             if (!_penumbra.Available)
@@ -188,6 +212,29 @@ public sealed class CommandRunner : IDisposable
             if (emote is null)
             {
                 _chat.PrintError($"[EC] {preset.SlashCommand}: no emote is set for this preset.");
+                return;
+            }
+
+            // Setting options on a mod that is missing or switched off succeeds
+            // and changes nothing, so without this the command silently plays a
+            // vanilla animation with no explanation anywhere.
+            var state = _penumbra.State(preset.ModDirectory);
+            if (state is null)
+            {
+                _chat.PrintError($"[EC] {preset.SlashCommand}: '{preset.ModName}' is not "
+                               + "installed in Penumbra.");
+                return;
+            }
+            if (!state.Enabled)
+            {
+                _chat.PrintError($"[EC] {preset.SlashCommand}: '{preset.ModName}' is disabled "
+                               + "in Penumbra - enable it and try again.");
+                return;
+            }
+            if (!_penumbra.ModsGloballyEnabled())
+            {
+                _chat.PrintError($"[EC] {preset.SlashCommand}: Penumbra's mods are turned off "
+                               + "globally, so nothing would apply.");
                 return;
             }
 
@@ -204,19 +251,32 @@ public sealed class CommandRunner : IDisposable
                 _chat.PrintError($"[EC] {preset.SlashCommand}: redraw did not finish in time; " +
                                  $"the animation may be the previous one.");
 
-            if (!_player.Perform(emote, out var problem))
+            // BACK ONTO THE GAME'S THREAD before touching game memory.
+            // ExecuteEmote is a raw call into the client; calling it from the
+            // thread the await resumed on can crash the process outright, and a
+            // try/catch does not catch an access violation. Everything after
+            // the await must be marshalled, including chat output and the
+            // Penumbra reads inside VerifyWinner.
+            await _framework.RunOnFrameworkThread(() =>
             {
-                _chat.PrintError($"[EC] {problem}");
-                return;
-            }
+                if (!_player.Perform(emote, out var problem))
+                {
+                    _chat.PrintError($"[EC] {problem}");
+                    return;
+                }
 
-            if (_config.VerifyAfterFire)
-                VerifyWinner(preset);
+                if (_config.VerifyAfterFire)
+                    VerifyWinner(preset);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _log.Error(ex, "firing preset failed");
             _chat.PrintError($"[EC] {preset.SlashCommand} failed: {ex.Message}");
+        }
+        finally
+        {
+            _fireGate.Release();
         }
     }
 
@@ -258,24 +318,49 @@ public sealed class CommandRunner : IDisposable
     /// this, a higher-priority mod silently wins and the user sees the wrong
     /// animation with no explanation.
     /// </summary>
+    /// <summary>
+    /// Game paths come from mod json written by different tools, so both
+    /// separators and either case are live in the wild. Compare normalised or
+    /// real conflicts go unnoticed.
+    /// </summary>
+    private static string Normalise(string path)
+        => path.Replace('\\', '/').ToLowerInvariant();
+
     private void VerifyWinner(Preset preset)
     {
         if (string.IsNullOrWhiteSpace(preset.EmotePapPath))
             return;
 
+        // GetPlayerResourcePaths is keyed by the ACTUAL file, whose value is the
+        // set of game paths it satisfies - not the other way round. Looking a
+        // game path up as a key silently missed every real conflict and warned
+        // about vanilla instead.
         var resolved = _penumbra.PlayerResourcePaths();
-        if (!resolved.TryGetValue(preset.EmotePapPath, out var files) || files.Count == 0)
+        var want = Normalise(preset.EmotePapPath);
+
+        string? actual = null;
+        foreach (var (file, gamePaths) in resolved)
+        {
+            if (gamePaths.Any(g => Normalise(g) == want))
+            {
+                actual = file;
+                break;
+            }
+        }
+        if (actual is null)
             return;   // not loaded yet; nothing useful to say
 
-        var mine = files.Any(f =>
-            f.Contains(preset.ModDirectory, StringComparison.OrdinalIgnoreCase));
+        // Anchor on the mod's own folder. A bare substring test matched any
+        // path containing the directory name - "Eve" matching "sleeve".
+        var expectedRoot = Path.Combine(_penumbra.ModDirectoryRoot(), preset.ModDirectory);
+        var mine = actual.StartsWith(expectedRoot, StringComparison.OrdinalIgnoreCase);
 
         if (!mine)
         {
-            var winner = Path.GetFileName(files.First());
+            var winner = Path.GetFileName(actual);
             _chat.PrintError(
                 $"[EC] {preset.SlashCommand}: another mod is overriding this emote " +
-                $"(it resolved to {winner}). Tick 'raise priority' on this preset, " +
+                $"(it resolved to {winner}). Turn on 'Always win conflicts', " +
                 $"or disable the conflicting mod.");
         }
     }

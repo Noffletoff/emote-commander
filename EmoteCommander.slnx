@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="EmoteCommander.Tests/EmoteCommander.Tests.csproj" />
+  <Project Path="EmoteCommander/EmoteCommander.csproj" />
+</Solution>
