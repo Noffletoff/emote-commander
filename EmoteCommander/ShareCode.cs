@@ -26,6 +26,19 @@ public static partial class ShareCode
 {
     private const int CurrentVersion = 1;
 
+    /// <summary>
+    /// Cap on the decompressed payload.
+    ///
+    /// A share code arrives from someone else, and gzip lets a few hundred
+    /// bytes expand into gigabytes. Without a limit, pasting a hostile code
+    /// would exhaust memory and take the game down. A megabyte is thousands of
+    /// presets - far past anything legitimate.
+    /// </summary>
+    private const int MaxDecompressedBytes = 1024 * 1024;
+
+    /// <summary>Sanity cap on preset count from one code.</summary>
+    private const int MaxPresets = 500;
+
     [GeneratedRegex(@"\[EC(\d+)\](.*?)\[/EC\1\]", RegexOptions.Singleline)]
     private static partial Regex CodeBlock();
 
@@ -75,11 +88,26 @@ public static partial class ShareCode
             using var input = new MemoryStream(compressed);
             using var gzip = new GZipStream(input, CompressionMode.Decompress);
             using var plain = new MemoryStream();
-            gzip.CopyTo(plain);
+            // Bounded copy, NOT gzip.CopyTo - see MaxDecompressedBytes.
+            var buffer = new byte[8192];
+            var total = 0;
+            int read;
+            while ((read = gzip.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                total += read;
+                if (total > MaxDecompressedBytes)
+                    throw new FormatException(
+                        "Share code expands to an unreasonable size and was rejected.");
+                plain.Write(buffer, 0, read);
+            }
 
             var presets = JsonSerializer.Deserialize<List<Preset>>(plain.ToArray());
             if (presets is null)
                 throw new FormatException("Share code contained no presets.");
+            if (presets.Count > MaxPresets)
+                throw new FormatException(
+                    $"Share code holds {presets.Count} commands, which is more than "
+                    + $"the {MaxPresets} allowed.");
 
             return presets;
         }

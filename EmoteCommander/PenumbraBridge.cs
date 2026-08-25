@@ -202,7 +202,29 @@ public sealed class PenumbraBridge : IDisposable
         var root = ModDirectoryRoot();
         if (string.IsNullOrEmpty(root)) return Array.Empty<string>();
 
+        // modDir can arrive from an imported share code, so it is untrusted.
+        // Without this, a crafted value like "..\..\Windows" would walk out of
+        // the Penumbra directory and enumerate json elsewhere on disk.
+        if (modDir.Contains("..", StringComparison.Ordinal)
+            || Path.IsPathRooted(modDir)
+            || modDir.IndexOfAny(new[] { '/', '\\' }) >= 0)
+        {
+            _log.Warning($"refusing suspicious mod directory: '{modDir}'");
+            return Array.Empty<string>();
+        }
+
         var folder = Path.Combine(root, modDir);
+
+        // Belt and braces: whatever the string was, the resolved path must sit
+        // inside the Penumbra root.
+        var rootFull = Path.GetFullPath(root);
+        var folderFull = Path.GetFullPath(folder);
+        if (!folderFull.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+        {
+            _log.Warning($"refusing mod directory outside the Penumbra root: '{modDir}'");
+            return Array.Empty<string>();
+        }
+
         if (!Directory.Exists(folder)) return Array.Empty<string>();
 
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
