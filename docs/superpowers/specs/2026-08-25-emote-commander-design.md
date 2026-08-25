@@ -64,6 +64,26 @@ It is referenced here only as evidence that the underlying approach — perform 
 owned emote, let Penumbra supply the animation, let sync carry it — works in
 production and is visible to sync partners.
 
+## Pose-based mods detect as plausible-but-wrong
+
+Found in game 2026-08-25 during the first real scan of 114 mods.
+
+Pose-family emotes are excluded from the emote catalogue, so no preset can be
+built directly on one. But a mod that TARGETS a pose still matches on whatever
+non-pose path it also touches. `Bar sit Claude Test 1` resolved to `/groundsit`
+— which starts ground sitting, but at pose index 1, not the index the mod was
+authored for. The command would run and the animation would be wrong.
+
+Excluding such mods outright is worse: they are legitimate mods and the user may
+still want the command. So **detect and warn** rather than hide. When a mod's
+redirects include any pose-family path, the UI must say so plainly:
+
+> "This mod targets a sit pose. A command can start the emote but cannot select
+> the pose index, so you may get the wrong variant."
+
+The user can then bind it knowingly, or not. This is the same reasoning as the
+conflict warnings: never silently produce the wrong result.
+
 ## Conflicts
 
 One game path resolves to one file, so another enabled mod can out-prioritise a

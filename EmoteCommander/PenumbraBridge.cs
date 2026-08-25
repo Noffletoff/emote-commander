@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -130,6 +133,70 @@ public sealed class PenumbraBridge : IDisposable
         var all = _getPlayerResourcePaths!.Invoke();
         // Keyed by object index; index 0 is the player.
         return all.TryGetValue(0, out var paths) ? paths : new();
+    }
+
+    /// <summary>
+    /// Every game path a mod redirects, across its default files and all option
+    /// groups.
+    ///
+    /// Read from the mod's own json on disk rather than over IPC, because
+    /// Penumbra exposes no "list this mod's files" call. A Penumbra mod folder
+    /// holds default_mod.json plus one group_*.json per option group; the
+    /// redirects are the KEYS of each "Files" object.
+    ///
+    /// Never throws - a malformed or missing mod folder yields nothing, since
+    /// this runs across every installed mod and one bad mod must not break the
+    /// scan.
+    /// </summary>
+    public IReadOnlyList<string> ModFilePaths(string modDir)
+    {
+        var root = ModDirectoryRoot();
+        if (string.IsNullOrEmpty(root)) return Array.Empty<string>();
+
+        var folder = Path.Combine(root, modDir);
+        if (!Directory.Exists(folder)) return Array.Empty<string>();
+
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(folder, "*.json",
+                                                          SearchOption.TopDirectoryOnly))
+            {
+                var name = Path.GetFileName(file);
+                var isDefault = name.Equals("default_mod.json", StringComparison.OrdinalIgnoreCase);
+                var isGroup = name.StartsWith("group_", StringComparison.OrdinalIgnoreCase);
+                if (!isDefault && !isGroup) continue;
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(file));
+                CollectFiles(doc.RootElement, paths);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Debug($"reading files of '{modDir}': {ex.Message}");
+        }
+        return paths.ToList();
+    }
+
+    private static void CollectFiles(JsonElement element, HashSet<string> into)
+    {
+        if (element.ValueKind is not JsonValueKind.Object) return;
+
+        // default_mod.json: { "Files": { gamePath: localPath } }
+        if (element.TryGetProperty("Files", out var files)
+            && files.ValueKind is JsonValueKind.Object)
+        {
+            foreach (var entry in files.EnumerateObject())
+                into.Add(entry.Name);
+        }
+
+        // group_*.json: { "Options": [ { "Files": {...} }, ... ] }
+        if (element.TryGetProperty("Options", out var options)
+            && options.ValueKind is JsonValueKind.Array)
+        {
+            foreach (var option in options.EnumerateArray())
+                CollectFiles(option, into);
+        }
     }
 
     // ---------------------------------------------------------------- write
