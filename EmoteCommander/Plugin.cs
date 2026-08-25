@@ -214,10 +214,45 @@ public sealed class Plugin : IDalamudPlugin
         var want = preset.EmotePapPath.Replace('\\', '/').ToLowerInvariant();
         var hit = resolved.FirstOrDefault(kv => kv.Value.Any(g =>
             string.Equals(g.Replace('\\', '/'), want, StringComparison.OrdinalIgnoreCase)));
-        _chat.Print(hit.Key is null
-            ? "[EC]   that path is not currently loaded by your character "
-              + "(wrong race for this preset, or the emote has not played yet)"
-            : $"[EC]   currently resolves to: {hit.Key}");
+
+        if (hit.Key is not null)
+        {
+            _chat.Print($"[EC]   currently resolves to: {hit.Key}");
+        }
+        else
+        {
+            _chat.Print("[EC]   that exact path is not loaded by your character.");
+
+            // The recorded path names one race. If the character actually loads
+            // a DIFFERENT race's copy of the same emote, the whole check has
+            // been looking in the wrong place - so search for the emote by name
+            // across every race and say what is really live.
+            var file = System.IO.Path.GetFileName(want);
+            var others = resolved
+                .SelectMany(kv => kv.Value.Select(g => (Actual: kv.Key, Game: g.Replace('\\', '/'))))
+                .Where(x => x.Game.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
+                .Take(4)
+                .ToList();
+
+            if (others.Count == 0)
+            {
+                _chat.Print($"[EC]   no race's copy of {file} is loaded at all - "
+                          + "play the emote once, then run this again.");
+            }
+            else
+            {
+                _chat.PrintError($"[EC]   but your character IS loading {file} "
+                               + "for a different race:");
+                foreach (var o in others)
+                {
+                    var race = o.Game.Split('/').Skip(2).FirstOrDefault() ?? "?";
+                    _chat.PrintError($"[EC]      {race} -> {System.IO.Path.GetFileName(o.Actual)}");
+                }
+                _chat.PrintError("[EC]   This preset records a path your character never reads, "
+                               + "so conflict handling cannot work. Re-save the command while "
+                               + "playing this character.");
+            }
+        }
     }
 
     /// <summary>Chat-side wrapper around the shared import on CommandRunner.</summary>
