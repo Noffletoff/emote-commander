@@ -238,18 +238,34 @@ public sealed class CommandRunner : IDisposable
                 return;
             }
 
+            // If the options are already exactly what this preset wants, there
+            // is nothing to apply and nothing to reload - so skip the redraw
+            // entirely. Repeating a command, or firing one whose animation is
+            // already selected, should not cost a visible blip.
+            var alreadySet = SettingsAlreadyMatch(preset, state);
+
+            var priorityChanged = false;
             if (_config.AlwaysWinConflicts)
-                RaiseAboveConflicts(preset);
+                priorityChanged = RaiseAboveConflicts(preset);
 
-            var failed = _penumbra.ApplySettings(preset.ModDirectory, preset.Settings);
-            if (failed.Count > 0)
-                _chat.PrintError(
-                    $"[EC] {preset.SlashCommand}: could not set {string.Join(", ", failed)} " +
-                    $"- the mod's options may have changed since this preset was made.");
+            if (!alreadySet)
+            {
+                var failed = _penumbra.ApplySettings(preset.ModDirectory, preset.Settings);
+                if (failed.Count > 0)
+                    _chat.PrintError(
+                        $"[EC] {preset.SlashCommand}: could not set {string.Join(", ", failed)} " +
+                        $"- the mod's options may have changed since this preset was made.");
+            }
 
-            if (!await _penumbra.RedrawAndAwaitAsync(_config.RedrawTimeoutMs).ConfigureAwait(false))
-                _chat.PrintError($"[EC] {preset.SlashCommand}: redraw did not finish in time; " +
-                                 $"the animation may be the previous one.");
+            // A priority change alters which file wins, so it needs the reload
+            // even when the selections themselves did not move.
+            if (!alreadySet || priorityChanged)
+            {
+                if (!await _penumbra.RedrawAndAwaitAsync(_config.RedrawTimeoutMs)
+                                    .ConfigureAwait(false))
+                    _chat.PrintError($"[EC] {preset.SlashCommand}: redraw did not finish in time; " +
+                                     $"the animation may be the previous one.");
+            }
 
             // BACK ONTO THE GAME'S THREAD before touching game memory.
             // ExecuteEmote is a raw call into the client; calling it from the
@@ -289,19 +305,19 @@ public sealed class CommandRunner : IDisposable
     /// conflict, not to shove the mod to the top of the pile forever.
     /// Does nothing when it already wins.
     /// </summary>
-    private void RaiseAboveConflicts(Preset preset)
+    private bool RaiseAboveConflicts(Preset preset)
     {
         if (string.IsNullOrWhiteSpace(preset.EmotePapPath))
-            return;
+            return false;
 
         var conflicts = _penumbra.Conflicts(preset.EmotePapPath, preset.ModDirectory);
         if (conflicts.Count == 0)
-            return;
+            return false;
 
         var highest = conflicts.Max(c => c.Priority);
         var mine = _penumbra.ModPriority(preset.ModDirectory) ?? 0;
         if (mine > highest)
-            return;
+            return false;
 
         if (_penumbra.SetPriority(preset.ModDirectory, highest + 1))
         {
@@ -310,7 +326,9 @@ public sealed class CommandRunner : IDisposable
             var names = string.Join(", ", conflicts.Select(c => $"{c.Name} ({c.Priority})"));
             _chat.Print($"[EC] Raised '{preset.ModName}' priority {mine} -> {highest + 1} "
                       + $"to beat: {names}");
+            return true;
         }
+        return false;
     }
 
     /// <summary>
@@ -318,6 +336,34 @@ public sealed class CommandRunner : IDisposable
     /// this, a higher-priority mod silently wins and the user sees the wrong
     /// animation with no explanation.
     /// </summary>
+    /// <summary>
+    /// Whether Penumbra already holds exactly the selections this preset wants.
+    ///
+    /// Compared as case-insensitive SETS: Penumbra does not promise an order
+    /// for a multi-select group, so comparing sequences would report a false
+    /// difference and reintroduce the redraw this exists to avoid.
+    ///
+    /// Only the groups the preset names are considered. A preset deliberately
+    /// says nothing about other groups, so differences there are not its
+    /// business.
+    /// </summary>
+    private static bool SettingsAlreadyMatch(Preset preset, PenumbraBridge.ModState state)
+    {
+        foreach (var (group, wanted) in preset.Settings)
+        {
+            if (!state.Settings.TryGetValue(group, out var current))
+                return false;      // group gone, or never set - let apply report it
+
+            var a = new HashSet<string>(wanted ?? new List<string>(),
+                                        StringComparer.OrdinalIgnoreCase);
+            var b = new HashSet<string>(current ?? new List<string>(),
+                                        StringComparer.OrdinalIgnoreCase);
+            if (!a.SetEquals(b))
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>
     /// Game paths come from mod json written by different tools, so both
     /// separators and either case are live in the wild. Compare normalised or
